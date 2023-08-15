@@ -1,17 +1,48 @@
+#![allow(dead_code)]
+use crate::types::L1IncomingMessageHeader;
 use base64::{engine::general_purpose, Engine as _};
-use ethers::types::{H160, U256};
+use ethers::types::{Transaction, H160};
 use ethers::utils::rlp::{self, DecoderError, Rlp};
 
-use crate::types::L1IncomingMessageHeader;
-
 const MAX_L2_MESSAGE_SIZE: usize = 256 * 1024;
-const L1_MESSAGE_TYPE_L2_MESSAGE: i64 = 3;
+
+enum L2MessageKind {
+    UnsignedUserTx,
+    ContractTx,
+    NonMutatingCall,
+    Batch,
+    SignedTx,
+    // 5 is reserved
+    Heartbeat, // deprecated
+    SignedCompressedTx,
+}
+
+impl From<u8> for L2MessageKind {
+    fn from(v: u8) -> Self {
+        match v {
+            0 => L2MessageKind::UnsignedUserTx,
+            1 => L2MessageKind::ContractTx,
+            2 => L2MessageKind::NonMutatingCall,
+            3 => L2MessageKind::Batch,
+            4 => L2MessageKind::SignedTx,
+            6 => L2MessageKind::Heartbeat,
+            7 => L2MessageKind::SignedCompressedTx,
+            _ => panic!("L2MessageKind {} is not supported", v),
+        }
+    }
+}
 
 /// For decoding "to"
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     Create,
     Call(H160),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DecodedMsg {
+    DecodedBatch(Vec<Transaction>),
+    DecodedSignedTx(Transaction),
 }
 
 impl rlp::Decodable for Action {
@@ -29,68 +60,37 @@ impl rlp::Decodable for Action {
 }
 
 impl L1IncomingMessageHeader {
-    pub fn decode(&self) -> Option<(H160, U256, Vec<u8>)> {
+    pub fn decode(&self) -> Option<DecodedMsg> {
         if self.l2msg.len() > MAX_L2_MESSAGE_SIZE {
             return None;
         }
 
-        // TODO implement full decoding of batch transactions and return full tx
-        // let l2_bytes = match general_purpose::STANDARD
-        //     .decode(&decoded_root.messages[0].message.message.l2msg) {
-        //     Ok(d) => d,
-        //     Err(_) => return
-        // };
+        let l2_bytes = general_purpose::STANDARD.decode(&self.l2msg).unwrap();
 
-        // let l2_tx: Transaction = match
-        //     ethers::utils::rlp::decode(&l2_bytes[1..]) {
-        //     Ok(d) => d,
-        //     Err(_) => return
-        // }; For batch txns
+        match L2MessageKind::from(l2_bytes[0]) {
+            L2MessageKind::Batch => {
+                let vec_tx = Self::parse_batch_transactions(&l2_bytes[1..]);
+                Some(DecodedMsg::DecodedBatch(vec_tx))
+            }
+            L2MessageKind::SignedTx => {
+                let tx = ethers::utils::rlp::decode(&l2_bytes[1..]).unwrap();
+                Some(DecodedMsg::DecodedSignedTx(tx))
+            }
+            _ => None,
+        }
+    }
 
-        if self.header.kind == L1_MESSAGE_TYPE_L2_MESSAGE {
-            return general_purpose::STANDARD
-                .decode(self.l2msg.as_bytes())
-                .ok()
-                .and_then(Self::parse_l2_message);
+    fn parse_batch_transactions(data: &[u8]) -> Vec<Transaction> {
+        let mut result = Vec::new();
+        let mut i = 0;
+        while i < data.len() - 8 {
+            let size_bytes = &data[i..i + 8];
+            let size = u64::from_be_bytes(size_bytes.try_into().unwrap()) as usize;
+            let msg = &data[i + 8..i + 8 + size];
+            result.push(ethers::utils::rlp::decode(&msg[1..]).unwrap());
+            i += 8 + size;
         }
 
-        None
-    }
-
-    // 2 us faster
-    fn parse_l2_message(data: Vec<u8>) -> Option<(H160, U256, Vec<u8>)> {
-        if *data.first()? == 4 {
-            let buf_after = data.get(1..)?;
-            let pointer = *buf_after.first()?;
-            // Regular transactions
-            if pointer > 0x7f {
-                // Legacy tx
-                // Last val at 8
-                let rlp_object = rlp::Rlp::new(buf_after);
-                // Offset at zero
-                return Self::parse_single_tx(rlp_object, 0);
-            } else if pointer == 1 {
-                // Normal fee with access list
-                // Last val at 10
-                // Offset at 1 (EIP-2930)
-                let rlp_object = rlp::Rlp::new(&buf_after[1..]);
-                return Self::parse_single_tx(rlp_object, 1);
-            } else if pointer == 2 {
-                // Dynamic fee with access list
-                // Last val at 11
-                // Offset at 2 (EIP 1559)
-                let rlp_object = rlp::Rlp::new(&buf_after[1..]);
-                return Self::parse_single_tx(rlp_object, 2);
-            }
-        };
-        None
-    }
-
-    fn parse_single_tx(data: Rlp, offset: usize) -> Option<(H160, U256, Vec<u8>)> {
-        Some((
-            data.val_at(offset + 3).ok()?,
-            data.val_at(offset + 4).ok()?,
-            data.val_at(offset + 5).ok()?,
-        ))
+        result
     }
 }

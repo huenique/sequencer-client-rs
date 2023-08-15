@@ -20,7 +20,7 @@ async fn main() {
         .expect("Failed to create relay client");
     tokio::spawn(RelayClients::start_reader(relay_client));
 
-    let mut highest_seq_number: i64 = 0;
+    let mut highest_seq_number: u64 = 0;
 
     loop {
         let data = receiver
@@ -35,6 +35,10 @@ async fn main() {
 
         highest_seq_number = msg_seq_num;
 
-        info!("Received message, sequencer_number: {:?} ", msg_seq_num);
+        info!(
+            "Received message, sequencer_number: {:?} | data: {:?}",
+            msg_seq_num,
+            data.messages[0].message.message.decode()
+        );
     }
 }

@@ -32,9 +32,7 @@ impl RelayClient {
         info!("Adding client | Client Id: {}", id);
 
         let key = tungstenite::handshake::client::generate_key();
-        let host = url
-            .host_str()
-            .ok_or(RelayError::InvalidUrl)?;
+        let host = url.host_str().ok_or(RelayError::InvalidUrl)?;
 
         let req = tungstenite::handshake::client::Request::builder()
             .method("GET")
